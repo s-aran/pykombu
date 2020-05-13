@@ -5,10 +5,30 @@ import json
 import os
 import os.path
 import pprint
+import sys
 import re
 import xml.etree.ElementTree as ET
 from typing import Optional, Union
 
+
+class ArgumentManager(object):
+
+    def __init__(self):
+        self.__parser = argparse.ArgumentParser()
+        self.__parser.add_argument('input', action='store', nargs=None, const=None, default=None, type=str, choices=None,
+            help='input file', metavar=None)
+        self.__parser.add_argument('rule', action='store', nargs=None, const=None, default=None, type=str, choices=None, 
+            help='convertion rule json file', metavar=None)
+        self.__parser.add_argument('output', action='store', nargs=None, const=None, default=None, type=str, choices=None,
+            help='output file', metavar=None)
+        self.__parser.add_argument('--table', action='store', nargs=None, const=None, default=None, type=str, choices=None,
+            help='table name (sql only)', metavar=None)
+
+    def parse(self):
+        return self.__parser.parse_args()
+
+    def get_parser(self):
+        return self.__parser
 
 class Logger(object):
     class Level(enum.IntEnum):
@@ -156,6 +176,52 @@ class ConverterBase(object):
         raise NotImplementedError()
 
 
+class CsvConverter(ConverterBase):
+    def convert(self, data: list, types: dict) -> list:
+        date_re_str = "([0-9]{4})[/-]([0-9]{2})[/-]([0-9]{2})"
+        time_re_str = "([0-9]{2}):([0-9]{2}):([0-9]{2})"
+        re_date = re.compile(date_re_str)
+        re_datetime = re.compile("{0} {1}".format(date_re_str, time_re_str))
+
+        result = []
+        for i, d in enumerate(data):
+            tv = {}
+            for k, v in d.items():
+                tv[k] = v
+                if v is None:
+                    tv[k] = ''
+
+                if k not in types.keys():
+                    continue
+
+                t = types[k]
+                if t == "str":
+                    tv[k] = '"{0}"'.format(v)
+                elif t == "int":
+                    pass
+                elif t == "date":
+                    if v == '':
+                        tv[k] = None
+                        continue
+                    d = re_date.match(v)
+                    f = '{0}-{1}-{2}'
+                    tv[k] = "{0}".format(f.format(d[1], d[2], d[3]))
+                elif t == "datetime":
+                    if v == '':
+                        tv[k] = None
+                        continue
+                    tv[k] = "{0}".format(v)
+                elif t == "bool":
+                    lv = v.lower()
+                    if lv == 'true' or lv == 'yes':
+                        tv[k] = 'True'
+                    else:
+                        tv[k] = 'False'
+
+            result.append(tv)
+        return result
+
+
 class SqlConverter(ConverterBase):
     def convert(self, data: list, types: dict) -> list:
         date_re_str = "[0-9]{4}[/-][0-9]{2}[/-][0-9]{2}"
@@ -180,6 +246,12 @@ class SqlConverter(ConverterBase):
                     tv[k] = "'{0}'".format(v)
                 elif t == "datetime":
                     tv[k] = "'{0}'".format(v)
+                elif t == "bool":
+                    lv = v.lower()
+                    if lv == 'true' or lv == 'yes':
+                        tv[k] = True
+                    else:
+                        tv[k] = False
 
             result.append(tv)
         return result
@@ -194,7 +266,26 @@ class WriterBase(object):
 
 
 class CsvWriter(WriterBase):
-    pass
+    def save(
+        self,
+        file_path: str,
+        data: list
+    ):
+        with open(file_path, WriterBase.Constants.FileMode) as f:
+            columns = []
+            for i, d in enumerate(data):
+                values = []
+
+                if not columns:
+                    for k in d.keys():
+                        columns.append('"{0}"'.format(k))
+                    line = '{0}\n'.format(','.join(columns))
+                    f.write(line)
+
+                for k, v in d.items():
+                    values.append('{0}'.format(v if v is not None else ''))
+                line = '{0}\n'.format(','.join(values))
+                f.write(line)
 
 
 class JsonWriter(WriterBase):
@@ -219,17 +310,17 @@ class SqlWriter(WriterBase):
                 table_name if db_name is None else "{0}.{1}".format(db_name, table_name)
             )
             if truncate:
-                f.write("TRUNCATE TABLE {0}".format(table))
+                f.write("TRUNCATE TABLE {0};\n".format(table))
 
-            base_sql = "insert INTO {0} ({1}) VALUES ({2});\n"
+            base_sql = "INSERT INTO {0} ({1}) VALUES ({2});\n"
 
             for i, d in enumerate(data):
                 columns = []
                 values = []
                 for k, v in d.items():
-                    columns.append(k)
-                    values.append(v)
-                sql = base_sql.format(table, ",".join(columns), ",".join(values))
+                    columns.append('{0}'.format(k))
+                    values.append('{0}'.format(v))
+                sql = base_sql.format(table, ", ".join(columns), ", ".join(values))
                 f.write(sql)
 
 
@@ -296,6 +387,9 @@ class FileTypeDetecter(object):
         with open(file_path, "r") as f:
             for i, l in enumerate(f.readlines()):
                 line = l.lstrip().rstrip()
+                if i == 0:
+                    continue
+
                 if i % 2 == 0:
                     result = re_row_separator.match(line) is not None
                     if not result:
@@ -369,7 +463,7 @@ class FileTypeDetecter(object):
         ] = cls.__is_exported_keep_format_and_layout_text_by_ms_access(file_path)
         results[cls.FileType.Sql] = cls.__is_sql(file_path)
         results[cls.FileType.Others] = True
-        # Logger.print_container(results)
+        Logger.print_container(results)
 
         return [k for k, v in results.items() if v][0]
 
@@ -385,24 +479,34 @@ class FileTypeDetecter(object):
 
         return readers[file_type]
 
+def convert(args, converter):
+    rule_filepath = args.rule
+    convert_rules = converter.load(rule_filepath)
+    return converter.convert(data, convert_rules)
+    # Logger.print_container(out_data)
 
 if __name__ == "__main__":
     # Logger.set_level(Logger.Level.Debug)
+    ap = ArgumentManager()
+    args = ap.parse()
 
     # path = "test.xml"
-    path = "test.txt"
+    path = args.input
     file_type = FileTypeDetecter.detect(path)
-    print(file_type)
+    # print(file_type)
     reader = FileTypeDetecter.get_reader(file_type)
     data = reader.load(path)
 
-    converter = SqlConverter()
-    rule_filepath = "character_rule.json"
-    convert_rules = converter.load(rule_filepath)
-    out_data = converter.convert(data, convert_rules)
-    Logger.print_container(out_data)
+    out_path = args.output
+    _, out_ext = os.path.splitext(out_path)
+    lower_ext = out_ext.lower()
+    if lower_ext == '.sql':
+        out_data = convert(args, SqlConverter())
+        writer = SqlWriter()
+        writer.save(out_path, out_data, args.table)
+    elif lower_ext == '.csv':
+        out_data = convert(args, CsvConverter())
+        writer = CsvWriter()
+        writer.save(out_path, out_data)
 
-    out_path = "output.sql"
-    writer = SqlWriter()
-    writer.save(out_path, out_data, "character")
 
