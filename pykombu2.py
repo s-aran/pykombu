@@ -218,7 +218,26 @@ class PyKombu:
             list[str]: Convert result
         """
         data = self.__pre_process()
+        if len(data) <= 0:
+            return []
+
         result = []
-        for e in data:
-            result.append("{}\n".format(converter.convert(e)))
+
+        pre = converter.pre_data(data[0])
+        if len(pre) > 0:
+            result.append("{}\n".format(pre))
+
+        for e in data[:-1]:
+            result.append(
+                "{}{}\n".format(converter.convert(e), converter.get_delimiter())
+            )
+
+        result.append(
+            "{}{}\n".format(converter.convert(data[-1]), converter.get_last_delimiter())
+        )
+
+        post = converter.post_data(data[0])
+        if len(post) > 0:
+            result.append("{}\n".format(post))
+
         return result
